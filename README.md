@@ -25,23 +25,42 @@
 
 Подстановки: `{name}`, `{script}`, `{dir}`, `{server_ip}`, `{user_id}`. Все команды выполняются из `~/vpncreator`.
 
-## Запуск
+## Установка одной командой
+
+Сервер: Ubuntu 20.04+ / Debian 11+, вход под root.
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/k9032431-cmd/VPNCreator/HEAD/install.sh)
+```
+
+Скрипт спросит токен бота и ваш Telegram ID, сам поставит всё нужное, сгенерирует `SECRET_KEY`,
+создаст сервис systemd (автозапуск, перезапуск при сбое) и команду `vpncreator`.
+
+Без вопросов:
+```bash
+BOT_TOKEN=123456:ABC... ADMIN_IDS=111111111 bash <(curl -fsSL https://raw.githubusercontent.com/k9032431-cmd/VPNCreator/HEAD/install.sh)
+```
+
+Управление:
+
+| Команда | Что делает |
+|---|---|
+| `vpncreator status` | статус бота |
+| `vpncreator logs` | логи в реальном времени |
+| `vpncreator restart` / `stop` / `start` | перезапуск / остановка / запуск |
+| `vpncreator update` | обновить из GitHub (настройки и база сохраняются) |
+| `vpncreator config` | сменить токен, админов, название |
+| `vpncreator backup` | архив базы и `.env` в `/root` |
+| `vpncreator uninstall` | удалить бота полностью |
+
+Файлы: код — `/opt/VPNCreator`, база — `/opt/VPNCreator/data/bot.db`, настройки — `/opt/VPNCreator/.env`.
+
+### Docker (альтернатива)
 
 ```bash
 cp .env.example .env   # заполните BOT_TOKEN, ADMIN_IDS, SECRET_KEY
-```
-
-**Docker:**
-```bash
 docker compose up -d --build
 ```
-
-**Без Docker:**
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m bot
-```
-Для автозапуска есть `deploy/vpncreator.service` (systemd, путь `/opt/VPNCreator`).
 
 ## Премиум-эмодзи
 
