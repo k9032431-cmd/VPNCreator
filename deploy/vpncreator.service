@@ -1,0 +1,12 @@
+[Unit]
+Description=VPN Creator Telegram bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/VPNCreator
+ExecStart=/opt/VPNCreator/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
