@@ -101,7 +101,8 @@ async def script_card(script_id: int) -> tuple[str, object] | None:
         f"{e('file')} <b>{escape(s['name'])}</b>  {e('ok') if s['enabled'] else e('ban') + ' выключен'}\n\n"
         f"{e('file')} Файл: {file}\n"
         f"{e('terminal')} Установка: <b>{len(install)}</b> шаг.\n"
-        f"{e('search')} Проверка: {('<code>' + escape(s['check_cmd']) + '</code>') if s['check_cmd'] else '—'}\n"
+        f"{e('search')} Проверка: "
+        f"{('<code>' + escape(s['check_cmd']) + '</code>') if s['check_cmd'] else e('warn') + ' не задана'}\n"
         f"{e('key_new')} Создание ключа: <b>{len(keysteps)}</b> шаг.\n"
         f"{e('upload')} Ключ: {result}\n"
         f"{e('trash')} Удаление ключа: {len(delsteps) or '—'}\n"
@@ -230,6 +231,8 @@ async def ask(target: Message | CallbackQuery, state: FSMContext, field: str):
                 f"Команда, которая успешна, если скрипт <b>уже установлен</b> на сервере. "
                 f"Тогда бот не будет запускать установку повторно (важно для скриптов, "
                 f"которые при втором запуске показывают меню).\n\n"
+                f"{e('warn')} <b>Обязательно задайте, если скрипт при повторном запуске показывает меню</b> "
+                f"(как OpenVPN): иначе на сервере, где VPN уже стоит, ответы установки попадут в меню.\n\n"
                 f"Пример для OpenVPN:\n<pre>test -f /etc/openvpn/server.conf</pre>")
         if cur.get("check_cmd"):
             text += f"\nСейчас: <code>{escape(cur['check_cmd'])}</code>"

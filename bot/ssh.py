@@ -216,12 +216,28 @@ async def session(conn: asyncssh.SSHClientConnection, lines: list[str], timeout:
             return result(False, "Терминал закрылся сразу после запуска")
         proc.stdin.write(b"set -e; bind 'set enable-bracketed-paste off' 2>/dev/null; clear\r")
 
+        asked: dict = {}  # последний вопрос, на который ответили, — чтобы заметить повтор
+
+        def repeated(tail: str) -> str | None:
+            """Скрипт не принял ответ и спросил то же самое снова → останавливаемся,
+            иначе следующие ответы уйдут не на те вопросы (например, в меню скрипта)."""
+            if not asked or tail.startswith(READY) or tail != asked["tail"]:
+                return None
+            if "\n" not in text()[asked["pos"]:]:
+                return None  # после ответа ничего не выводилось — это не повтор вопроса
+            return (f"Скрипт не принял ответ «{asked['line']}» на вопрос «{tail}» и спросил снова. "
+                    f"Остановлено, чтобы не ввести лишнего. Возможно, скрипт уже установлен "
+                    f"(задайте «Проверку установки») или вопросы идут в другом порядке")
+
         for i, line in enumerate(lines, 1):
             tail = await wait_input()
             if tail is None:
                 return result(False, f"Сессия завершилась на шаге {i}: «{line}» — предыдущая команда упала")
+            if err := repeated(tail):
+                return result(False, err)
             if on_step:
                 await on_step(i, line)
+            asked = {"tail": tail, "line": line, "pos": len(text())}
             if line.strip().lower() in ENTER_WORDS:
                 proc.stdin.write(b"\r")
             elif _ANY_KEY.search(tail):
@@ -241,6 +257,8 @@ async def session(conn: asyncssh.SSHClientConnection, lines: list[str], timeout:
                 return result(False, "Сессия завершилась с ошибкой")
             if tail.startswith(READY):
                 break
+            if err := repeated(tail):
+                return result(False, err)
             # вопрос висит дольше stuck — сообщаем
             started = time.monotonic()
             while not state["closed"] and screen_tail() == tail and time.monotonic() - started < stuck:
