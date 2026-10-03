@@ -7,6 +7,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, CallbackQuery, Message
 
+from . import updater
 from .common import UserMiddleware, db
 from .config import config
 from .emoji import e
@@ -43,9 +44,11 @@ async def main() -> None:
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="cancel", description="Отменить действие"),
     ])
+    watcher = asyncio.create_task(updater.watcher(bot))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        watcher.cancel()
         await db.close()
         await bot.session.close()
 

@@ -195,14 +195,51 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+  # Обновление по кнопке из админ-панели: бот (без root) кладёт файл-заявку,
+  # systemd видит его и запускает обновление от root.
+  cat > "/etc/systemd/system/$SERVICE-update.path" <<EOF
+[Unit]
+Description=VPN Creator: update request from the bot
+
+[Path]
+PathExists=$INSTALL_DIR/data/update.request
+Unit=$SERVICE-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat > "/etc/systemd/system/$SERVICE-update.service" <<EOF
+[Unit]
+Description=VPN Creator: self-update
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $INSTALL_DIR/install.sh _auto_update
+TimeoutStartSec=1800
+EOF
+  write_version
   systemctl daemon-reload
-  systemctl enable -q "$SERVICE"
+  systemctl enable -q "$SERVICE" "$SERVICE-update.path"
+  systemctl restart "$SERVICE-update.path"
   systemctl restart "$SERVICE"
   ok "Сервис $SERVICE запущен и добавлен в автозагрузку"
+  ok "Обновление по кнопке в админ-панели включено"
 
   ln -sf "$INSTALL_DIR/install.sh" "$CLI"
   chmod +x "$INSTALL_DIR/install.sh"
   ok "Команда управления: ${W}vpncreator${N}"
+}
+
+write_version() {
+  local f="$INSTALL_DIR/data/version.json"
+  cat > "$f" <<EOF
+{"sha": "$(git -C "$INSTALL_DIR" rev-parse HEAD)",
+ "branch": "$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD)",
+ "repo": "$(git -C "$INSTALL_DIR" config --get remote.origin.url)",
+ "date": "$(git -C "$INSTALL_DIR" log -1 --format=%cI)"}
+EOF
+  chown "$SERVICE_USER:$SERVICE_USER" "$f"
+  chmod 644 "$f"
 }
 
 verify() {
@@ -275,6 +312,23 @@ cmd_post_update() {
   ok "Обновление завершено"
 }
 
+cmd_auto_update() {
+  # Запускается systemd по заявке бота (см. vpncreator-update.path)
+  local data="$INSTALL_DIR/data" old new rc=0
+  [[ -f "$data/update.request" ]] || exit 0
+  mv -f "$data/update.request" "$data/update.running"
+  old=$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo "?")
+  bash "$INSTALL_DIR/install.sh" update > "$data/update.log" 2>&1 || rc=$?
+  new=$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo "?")
+  if ((rc == 0)); then
+    echo "ok $old $new" > "$data/update.result"
+  else
+    echo "fail $old $new" > "$data/update.result"
+  fi
+  chown "$SERVICE_USER:$SERVICE_USER" "$data/update.result" "$data/update.log" "$data/update.running" 2>/dev/null || true
+  chmod 644 "$data/update.result" "$data/update.log"
+}
+
 cmd_config() {
   need_root
   [[ -f "$INSTALL_DIR/.env" ]] || die "Бот не установлен"
@@ -305,8 +359,9 @@ cmd_uninstall() {
   local yn
   yn=$(ask "Удалить бота, базу и все данные? (yes/no)" "no")
   [[ "$yn" == "yes" ]] || { echo "Отменено."; exit 0; }
-  systemctl disable --now "$SERVICE" 2>/dev/null || true
-  rm -f "/etc/systemd/system/$SERVICE.service" "$CLI"
+  systemctl disable --now "$SERVICE" "$SERVICE-update.path" 2>/dev/null || true
+  rm -f "/etc/systemd/system/$SERVICE.service" "/etc/systemd/system/$SERVICE-update.path" \
+        "/etc/systemd/system/$SERVICE-update.service" "$CLI"
   systemctl daemon-reload
   rm -rf "$INSTALL_DIR"
   userdel "$SERVICE_USER" 2>/dev/null || true
@@ -334,6 +389,7 @@ case "${1:-install}" in
   install)      cmd_install ;;
   update)       cmd_update ;;
   _post_update) cmd_post_update ;;
+  _auto_update) cmd_auto_update ;;
   status)       systemctl status "$SERVICE" --no-pager ;;
   logs)         journalctl -u "$SERVICE" -f -n 100 ;;
   restart)      need_root; systemctl restart "$SERVICE"; ok "Перезапущен" ;;

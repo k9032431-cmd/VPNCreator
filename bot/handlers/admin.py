@@ -6,6 +6,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from .. import updater
 from ..common import ROLE_TITLES, Admin, IsAdmin, db
 from ..config import config
 from ..emoji import e
@@ -43,6 +44,7 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
              btn("Заблокированные", "a:banned:0", emoji="ban", style=BLUE)],
             [btn(f"Скрипты VPN ({scripts})", "sc:list", emoji="file", style=GREEN),
              btn("Баннер", "set:banner", emoji="image", style=BLUE)],
+            btn("Обновить бота", "a:upd", emoji="refresh", style=GREEN),
             back(),
         ),
     )
@@ -201,3 +203,60 @@ async def emoji_ids(message: Message):
 async def cmd_emoji(message: Message):
     await message.answer(f"{e('tip')} Отправьте мне сообщение с премиум-эмодзи — я пришлю их ID.\n"
                          f"Затем впишите ID в файл <code>bot/emoji.py</code>.")
+
+
+# ---------------- обновление бота ----------------
+
+@router.callback_query(F.data == "a:upd")
+async def cb_update(call: CallbackQuery):
+    title = f"{e('refresh')} <b>Обновление бота</b>\n\n"
+    if not updater.supported():
+        return await render(
+            call,
+            title + f"{e('warn')} Обновление по кнопке ещё не включено на этом сервере.\n\n"
+            f"Один раз выполните на сервере бота:\n<pre>vpncreator update</pre>\n"
+            f"После этого кнопка будет обновлять бота сама.",
+            kb(back("a:menu")))
+    if updater.in_progress():
+        return await render(call, title + f"{e('loading')} Обновление уже идёт — бот пришлёт результат.",
+                            kb(back("a:menu")))
+    ver = updater.local_version()
+    current = f"{e('info')} Текущая версия: <code>{ver['sha'][:7]}</code> от {ver.get('date', '')[:10]}\n\n"
+    await render(call, title + current + f"{e('loading')} Проверяю GitHub…")
+    try:
+        info = await updater.check()
+    except Exception as exc:  # noqa: BLE001
+        return await render(call, title + current + f"{e('error')} Не удалось проверить: {escape(str(exc))}",
+                            kb(btn("Проверить снова", "a:upd", emoji="refresh", style=BLUE),
+                               btn("Обновить всё равно", "a:upd:go", emoji="ok", style=GREEN), back("a:menu")))
+    if not info["behind"]:
+        return await render(call, title + current + f"{e('ok')} У вас последняя версия.",
+                            kb(btn("Проверить снова", "a:upd", emoji="refresh", style=BLUE), back("a:menu")))
+    changes = (f"{e('rocket')} <b>Доступно изменений: {info['behind']}</b>\n{updater.commits_text(info['commits'])}"
+               if info["behind"] > 0 else
+               f"{e('rocket')} <b>Доступна новая версия</b> <code>{info['latest'][:7]}</code>")
+    await render(
+        call,
+        title + current + f"{changes}\n\n"
+        f"{e('tip')} Бот перезапустится примерно на минуту. Пользователи, серверы, ключи и скрипты сохранятся.",
+        kb(btn("Обновить сейчас", "a:upd:go", emoji="ok", style=GREEN), back("a:menu")))
+
+
+@router.callback_query(F.data == "a:upd:go")
+async def cb_update_go(call: CallbackQuery):
+    from .keys import _busy
+    if not updater.supported():
+        return await cb_update(call)
+    if updater.in_progress():
+        return await call.answer("Обновление уже идёт", show_alert=True)
+    if _busy:
+        return await call.answer(f"Сейчас создаются ключи ({len(_busy)}). Подождите пару минут и повторите.",
+                                 show_alert=True)
+    try:
+        commits = (await updater.check())["commits"]
+    except Exception:  # noqa: BLE001
+        commits = []
+    updater.request(call.from_user.id, commits)
+    await render(call, f"{e('loading')} <b>Обновление запущено</b>\n\n"
+                       f"Скачиваю новую версию и перезапускаю бота — обычно 1–3 минуты.\n"
+                       f"Когда всё будет готово, пришлю сообщение.")
