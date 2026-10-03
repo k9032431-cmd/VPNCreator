@@ -344,9 +344,22 @@ def key_document(key: dict) -> BufferedInputFile:
     return BufferedInputFile(key["value"].encode(), key.get("filename") or f"{key['name']}.txt")
 
 
+def key_caption(key: dict) -> str:
+    text = f"{e('keys')} <code>{escape(key['name'])}</code>"
+    if (key.get("filename") or "").lower().endswith(".ovpn"):
+        text += (
+            f"\n\n{e('tip')} <b>Как открыть в OpenVPN:</b>\n"
+            "📱 <b>Android:</b> ⋮ у файла → «Поделиться» → <b>OpenVPN Connect</b>\n"
+            "🍏 <b>iPhone:</b> нажмите на файл → «Поделиться» → <b>OpenVPN</b>\n"
+            "Или в OpenVPN Connect: <b>Import Profile → Upload File</b> → папка "
+            "<code>Download/Telegram</code>"
+        )
+    return text
+
+
 async def send_key(msg: Message, key: dict, created: bool = False):
     if created and key.get("filename"):
-        await msg.answer_document(key_document(key), caption=f"{e('keys')} <code>{escape(key['name'])}</code>")
+        await msg.answer_document(key_document(key), caption=key_caption(key))
     try:
         await msg.edit_text(key_text(key, created), reply_markup=key_markup(key, created))
     except TelegramBadRequest:
@@ -391,7 +404,7 @@ async def cb_file(call: CallbackQuery, db_user: dict):
     if not key:
         return await call.answer("Ключ не найден", show_alert=True)
     await call.answer()
-    await call.message.answer_document(key_document(key), caption=f"{e('keys')} <code>{escape(key['name'])}</code>")
+    await call.message.answer_document(key_document(key), caption=key_caption(key))
 
 
 @router.callback_query(F.data.startswith("k:del:"))
