@@ -10,6 +10,8 @@ class Config(BaseSettings):
     secret_key: str
     db_path: str = "data/bot.db"
     bot_title: str = "OpenVPN Creator"
+    # Премиум-эмодзи (нужен Telegram Premium у владельца бота). false — только обычные эмодзи
+    premium_emoji: bool = True
 
     # Таймауты SSH (секунды)
     install_step_timeout: int = 1800
