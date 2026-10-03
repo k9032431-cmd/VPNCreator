@@ -27,19 +27,22 @@ def user_title(u: dict) -> str:
 async def cb_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
     pending = await db.count_users(("pending",))
+    scripts = len(await db.list_scripts())
     await render(
         call,
         f"{e('admin')} <b>Админ-панель</b>\n\n"
         f"{e('users')} Пользователей с доступом: <b>{await db.count_users(('user', 'admin'))}</b>\n"
         f"{e('bell')} Заявок: <b>{pending}</b>\n"
         f"{e('servers')} Серверов: <b>{await db.count_servers()}</b>\n"
-        f"{e('keys')} Ключей: <b>{await db.count_keys()}</b>",
+        f"{e('keys')} Ключей: <b>{await db.count_keys()}</b>\n"
+        f"{e('file')} Скриптов: <b>{scripts}</b>",
         kb(
             [btn("Пользователи", "a:users:0", emoji="users", style=BLUE),
              btn(f"Заявки ({pending})", "a:pending:0", emoji="bell", style=GREEN if pending else BLUE)],
             [btn("Выдать доступ по ID", "a:grantid", emoji="id", style=BLUE),
              btn("Заблокированные", "a:banned:0", emoji="ban", style=BLUE)],
-            btn("Настройки скрипта", "set:admin", emoji="settings", style=BLUE),
+            [btn(f"Скрипты VPN ({scripts})", "sc:list", emoji="file", style=GREEN),
+             btn("Баннер", "set:banner", emoji="image", style=BLUE)],
             back(),
         ),
     )

@@ -53,12 +53,17 @@ class CreateKey(StatesGroup):
 
 
 class Settings(StatesGroup):
-    file = State()
-    install = State()
-    key_cmd = State()
-    delete_cmd = State()
-    regex = State()
     banner = State()
+
+
+class ScriptForm(StatesGroup):
+    name = State()
+    file = State()
+    steps = State()
+    check = State()
+    result_type = State()
+    result_path = State()
+    result_regex = State()
 
 
 class Admin(StatesGroup):

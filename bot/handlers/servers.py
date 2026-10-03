@@ -55,11 +55,16 @@ async def cb_list(call: CallbackQuery, state: FSMContext, db_user: dict):
 
 
 async def server_card(server: dict) -> str:
-    version = await db.config_version()
-    installed = server["installed_version"] == version
     keys = await db._scalar("SELECT COUNT(*) FROM keys WHERE server_id=?", (server["id"],))
     auth = f"{e('sshkey')} SSH-ключ" if server["auth_type"] == "key" else f"{e('lock')} Пароль"
-    status = f"{e('ok')} Установлено" if installed else f"{e('loading')} Установка при создании ключа"
+    lines = []
+    for s in await db.list_scripts(only_enabled=True):
+        v = await db.installed_version(server["id"], s["id"])
+        status = (f"{e('ok')} установлен" if v == s["version"] else
+                  f"{e('refresh')} обновится при следующем ключе" if v else
+                  f"{e('loading')} установится при первом ключе")
+        lines.append(f"   {e('rocket')} {escape(s['name'])}: {status}")
+    scripts = ("\n" + "\n".join(lines)) if lines else " —"
     return (
         f"{e('servers')} <b>{escape(server['name'])}</b>\n\n"
         f"{e('globe')} Хост: <code>{escape(server['host'])}</code>\n"
@@ -67,7 +72,7 @@ async def server_card(server: dict) -> str:
         f"{e('user')} Логин: <code>{escape(server['username'])}</code>\n"
         f"{auth}\n"
         f"{e('keys')} Ключей: <b>{keys}</b>\n"
-        f"{e('rocket')} Скрипт: {status}"
+        f"{e('file')} VPN:{scripts}"
     )
 
 
@@ -109,9 +114,9 @@ async def cb_reinstall(call: CallbackQuery, db_user: dict):
     server = await db.get_server(int(call.data.split(":")[2]), db_user["id"])
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
-    await db.set_server_version(server["id"], 0)
-    await call.answer("Скрипт будет установлен заново при создании следующего ключа", show_alert=True)
-    server["installed_version"] = 0
+    await db.reset_installed(server["id"])
+    await call.answer("При следующем ключе бот заново проверит и при необходимости выполнит установку",
+                      show_alert=True)
     await render(call, await server_card(server), server_kb(server["id"]))
 
 

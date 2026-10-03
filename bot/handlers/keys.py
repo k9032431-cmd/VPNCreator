@@ -24,19 +24,25 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _busy: set[int] = set()
 
 
-def placeholders(server: dict, user_id: int, name: str, files: list[dict]) -> dict[str, str]:
-    script = f"{ssh.REMOTE_DIR_SH}/{files[0]['name']}" if files else ""
+def placeholders(server: dict, user_id: int, name: str, script: dict | None) -> dict[str, str]:
+    file = f"{ssh.REMOTE_DIR_SH}/{script['filename']}" if script and script.get("filename") else ""
     return {
         "name": name,
         "user_id": str(user_id),
         "server_ip": server["host"],
         "dir": ssh.REMOTE_DIR_SH,
-        "script": script,
+        "file": file,
+        "script": file,
     }
 
 
-def install_steps(raw: str) -> list[str]:
-    return [line.strip() for line in raw.splitlines() if line.strip() and not line.strip().startswith("#")]
+def steps_of(raw: str, values: dict[str, str]) -> list[str]:
+    return [ssh.fill(line, values) for line in ssh.parse_steps(raw)]
+
+
+def session_output(output: str) -> str:
+    """Вывод сессии без служебных строк приглашения bash."""
+    return "\n".join(line for line in output.splitlines() if not line.startswith(ssh.READY)).strip()
 
 
 def extract_key(output: str, regex: str) -> str:
@@ -47,7 +53,7 @@ def extract_key(output: str, regex: str) -> str:
     return output.strip()
 
 
-# ---------------- создание ключа ----------------
+# ---------------- выбор сервера и скрипта ----------------
 
 @router.callback_query(F.data == "k:new")
 async def cb_new(call: CallbackQuery, state: FSMContext, db_user: dict):
@@ -64,35 +70,56 @@ async def cb_new(call: CallbackQuery, state: FSMContext, db_user: dict):
                  kb(*rows, back()))
 
 
-@router.callback_query(F.data.startswith("k:srv:"))
+@router.callback_query(F.data.regexp(r"^k:srv:\d+$"))
 async def cb_server(call: CallbackQuery, state: FSMContext, db_user: dict):
     server = await db.get_server(int(call.data.split(":")[2]), db_user["id"])
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
-    if not (await db.get("key_cmd")).strip():
+    scripts = await db.list_scripts(only_enabled=True)
+    if not scripts:
         return await render(
             call,
-            f"{e('warn')} <b>Скрипт ещё не настроен</b>\n\n"
-            f"Администратор должен указать команду создания ключа в «Настройках».",
+            f"{e('warn')} <b>Скрипты ещё не добавлены</b>\n\nАдминистратор должен добавить VPN-скрипт в админ-панели.",
             kb(back()),
         )
+    if len(scripts) == 1:
+        return await ask_name(call, state, server, scripts[0])
+    rows = [btn(s["name"], f"k:sc:{server['id']}:{s['id']}", emoji="rocket", style=BLUE) for s in scripts]
+    await render(call, f"{e('key_new')} <b>Создание ключа</b> · {e('servers')} {escape(server['name'])}\n\n"
+                       f"{e('point_down')} Какой VPN нужен?", kb(*rows, back("k:new")))
+
+
+@router.callback_query(F.data.regexp(r"^k:sc:\d+:\d+$"))
+async def cb_script(call: CallbackQuery, state: FSMContext, db_user: dict):
+    _, _, sid, scid = call.data.split(":")
+    server = await db.get_server(int(sid), db_user["id"])
+    script = await db.get_script(int(scid))
+    if not server or not script or not script["enabled"]:
+        return await call.answer("Сервер или скрипт не найден", show_alert=True)
+    await ask_name(call, state, server, script)
+
+
+def name_prompt(server: dict, script_name: str, error: str = "") -> str:
+    err = f"\n\n{e('error')} {error}" if error else ""
+    return (f"{e('key_new')} <b>Создание ключа</b> · {escape(script_name)} · {e('servers')} {escape(server['name'])}\n\n"
+            f"{e('tag')} Отправьте <b>название ключа</b> (латиница, цифры, <code>-</code> и <code>_</code>, "
+            f"до 32 символов) или нажмите «Автоматически».{err}")
+
+
+NAME_KB = kb(btn("Автоматически", "k:auto", emoji="auto", style=GREEN), cancel().inline_keyboard[0])
+
+
+async def ask_name(call: CallbackQuery, state: FSMContext, server: dict, script: dict):
     await state.set_state(CreateKey.name)
-    await state.update_data(server_id=server["id"])
-    msg = await render(
-        call,
-        f"{e('key_new')} <b>Создание ключа</b> · {e('servers')} {escape(server['name'])}\n\n"
-        f"{e('tag')} Отправьте <b>название ключа</b> (латиница, цифры, <code>-</code> и <code>_</code>, до 32 символов)"
-        f" или нажмите «Автоматически».",
-        kb(btn("Автоматически", "k:auto", emoji="auto", style=GREEN), cancel().inline_keyboard[0]),
-    )
+    await state.update_data(server_id=server["id"], script_id=script["id"])
+    msg = await render(call, name_prompt(server, script["name"]), NAME_KB)
     await state.update_data(prompt_id=msg.message_id)
 
 
 @router.callback_query(CreateKey.name, F.data == "k:auto")
 async def cb_auto(call: CallbackQuery, state: FSMContext, db_user: dict):
-    name = f"u{db_user['id']}_{secrets.token_hex(3)}"
-    await start_creation(call.message, state, db_user, name, edit=True)
     await call.answer()
+    await start_creation(call.message, state, db_user, f"u{db_user['id']}_{secrets.token_hex(3)}")
 
 
 @router.message(CreateKey.name, F.text)
@@ -103,29 +130,30 @@ async def in_name(message: Message, state: FSMContext, db_user: dict):
     except TelegramBadRequest:
         pass
     data = await state.get_data()
+    error = ""
     if not NAME_RE.match(name):
-        return await _prompt_error(message, data, "Только латиница, цифры, - и _ (до 32 символов).")
-    if await db.key_name_exists(data["server_id"], name):
-        return await _prompt_error(message, data, "Ключ с таким названием уже есть на этом сервере.")
-    await start_creation(message, state, db_user, name, edit=False)
+        error = "Только латиница, цифры, - и _ (до 32 символов)."
+    elif await db.key_name_exists(data["server_id"], name):
+        error = "Ключ с таким названием уже есть на этом сервере."
+    if error:
+        server = await db.get_server(data["server_id"], db_user["id"])
+        script = await db.get_script(data["script_id"])
+        text = name_prompt(server, script["name"] if script else "", error)
+        try:
+            await message.bot.edit_message_text(text, chat_id=message.chat.id, message_id=data["prompt_id"],
+                                                reply_markup=NAME_KB)
+        except (TelegramBadRequest, KeyError):
+            await message.answer(text, reply_markup=NAME_KB)
+        return
+    await start_creation(message, state, db_user, name)
 
 
-async def _prompt_error(message: Message, data: dict, error: str):
-    text = (f"{e('key_new')} <b>Создание ключа</b>\n\n{e('tag')} Отправьте <b>название ключа</b> "
-            f"или нажмите «Автоматически».\n\n{e('error')} {error}")
-    markup = kb(btn("Автоматически", "k:auto", emoji="auto", style=GREEN), cancel().inline_keyboard[0])
-    try:
-        await message.bot.edit_message_text(text, chat_id=message.chat.id, message_id=data["prompt_id"],
-                                            reply_markup=markup)
-    except (TelegramBadRequest, KeyError):
-        await message.answer(text, reply_markup=markup)
+# ---------------- создание ключа ----------------
 
-
-async def start_creation(message: Message, state: FSMContext, db_user: dict, name: str, edit: bool):
+async def start_creation(message: Message, state: FSMContext, db_user: dict, name: str):
     data = await state.get_data()
     await state.clear()
     uid = db_user["id"]
-    server = await db.get_server(data["server_id"], uid)
     bot, chat_id = message.bot, message.chat.id
 
     status_msg = None
@@ -135,113 +163,163 @@ async def start_creation(message: Message, state: FSMContext, db_user: dict, nam
                                                      message_id=data["prompt_id"])
         except TelegramBadRequest:
             pass
-    if status_msg is None or status_msg is True:
+    if not isinstance(status_msg, Message):
         status_msg = await bot.send_message(chat_id, f"{e('loading')} Подготовка…")
 
-    if not server:
-        return await status_msg.edit_text(f"{e('error')} Сервер не найден.", reply_markup=kb(home()))
+    server = await db.get_server(data.get("server_id", 0), uid)
+    script = await db.get_script(data.get("script_id", 0))
+    if not server or not script:
+        return await status_msg.edit_text(f"{e('error')} Сервер или скрипт не найден.", reply_markup=kb(home()))
     if uid in _busy:
         return await status_msg.edit_text(f"{e('warn')} Дождитесь завершения предыдущей операции.",
                                           reply_markup=kb(home()))
     _busy.add(uid)
     try:
-        await _create(status_msg, server, uid, name)
+        await Creation(status_msg, server, script, uid, name).run()
     finally:
         _busy.discard(uid)
 
 
-async def _create(status_msg: Message, server: dict, uid: int, name: str):
-    header = f"{e('key_new')} <b>Создание ключа</b> <code>{escape(name)}</code>\n{e('servers')} {escape(server['name'])}\n\n"
-    log: list[str] = []
-    last_edit = 0.0
+class Creation:
+    """Подключение → установка (один раз) → создание ключа → отправка пользователю."""
 
-    async def show(line: str | None = None, force: bool = False, replace_last: bool = False):
-        nonlocal last_edit
+    def __init__(self, msg: Message, server: dict, script: dict, uid: int, name: str):
+        self.msg, self.server, self.script, self.uid, self.name = msg, server, script, uid, name
+        self.values = placeholders(server, uid, name, script)
+        self.log: list[str] = []
+        self.last_edit = 0.0
+        self.header = (f"{e('key_new')} <b>Создание ключа</b> <code>{escape(name)}</code>\n"
+                       f"{e('rocket')} {escape(script['name'])} · {e('servers')} {escape(server['name'])}\n\n")
+
+    async def show(self, line: str | None = None, *, force: bool = False, replace: bool = False):
         if line is not None:
-            if replace_last and log:
-                log[-1] = line
+            if replace and self.log:
+                self.log[-1] = line
             else:
-                log.append(line)
-        if not force and time.monotonic() - last_edit < 1.0:
+                self.log.append(line)
+        if not force and time.monotonic() - self.last_edit < 1.5:
             return
-        last_edit = time.monotonic()
+        self.last_edit = time.monotonic()
         try:
-            await status_msg.edit_text(header + "\n".join(log[-12:]))
+            await self.msg.edit_text(self.header + "\n".join(self.log[-12:]))
         except TelegramBadRequest:
             pass
 
-    async def fail(error: str, output: str = ""):
-        out = f"\n\n<b>Вывод:</b>\n<pre>{escape(output[-1500:])}</pre>" if output.strip() else ""
+    async def fail(self, error: str, output: str = ""):
+        out = f"\n\n<b>Вывод:</b>\n<pre>{escape(output.strip()[-1500:])}</pre>" if output.strip() else ""
+        text = self.header + "\n".join(self.log[-10:]) + f"\n\n{e('error')} <b>{escape(error)}</b>{out}"
+        markup = kb(btn("Попробовать снова", f"k:sc:{self.server['id']}:{self.script['id']}",
+                        emoji="refresh", style=GREEN), home())
         try:
-            await status_msg.edit_text(
-                header + "\n".join(log[-12:]) + f"\n\n{e('error')} <b>{escape(error)}</b>{out}",
-                reply_markup=kb(btn("Попробовать снова", f"k:srv:{server['id']}", emoji="refresh", style=GREEN),
-                                home()))
+            await self.msg.edit_text(text[-4000:], reply_markup=markup)
         except TelegramBadRequest:
-            await status_msg.answer(f"{e('error')} <b>{escape(error)}</b>", reply_markup=kb(home()))
+            await self.msg.answer(f"{e('error')} <b>{escape(error)}</b>", reply_markup=markup)
 
-    files = await db.all_files()
-    values = placeholders(server, uid, name, files)
+    def stepper(self, title: str, steps: list[str]):
+        async def on_step(i: int, line: str):
+            shown = "Enter" if line.strip().lower() in ssh.ENTER_WORDS else line
+            shown = escape(shown if len(shown) <= 50 else shown[:47] + "…")
+            await self.show(f"{e('rocket')} {title}: шаг {i}/{len(steps)} · <code>{shown}</code>",
+                            replace=i > 1)
+        return on_step
 
-    await show(f"{e('loading')} Подключение к серверу…", force=True)
-    try:
-        conn = await ssh.connect(creds(server))
-    except ssh.SSHError as exc:
-        return await fail(str(exc))
-
-    async with conn:
-        await show(f"{e('ok')} Подключено к <code>{escape(server['host'])}</code>", force=True, replace_last=True)
-
-        version = await db.config_version()
-        if server["installed_version"] != version:
-            if files:
-                await show(f"{e('upload')} Загрузка скриптов ({len(files)})…", force=True)
-                try:
-                    await ssh.upload(conn, files)
-                except ssh.SSHError as exc:
-                    return await fail(str(exc))
-                await show(f"{e('ok')} Скрипты загружены", force=True, replace_last=True)
-
-            steps = install_steps(await db.get("install_cmds"))
-            for i, cmd in enumerate(steps, 1):
-                cmd = ssh.fill(cmd, values)
-                short = escape(cmd if len(cmd) <= 60 else cmd[:57] + "…")
-                await show(f"{e('rocket')} Шаг {i}/{len(steps)}: <code>{short}</code>", force=True)
-                try:
-                    res = await ssh.run(conn, cmd, config.install_step_timeout)
-                except ssh.SSHError as exc:
-                    return await fail(f"Шаг {i}: {exc}")
-                if not res.ok:
-                    return await fail(f"Шаг {i} завершился с кодом {res.code}", res.tail())
-                await show(f"{e('ok')} Шаг {i}/{len(steps)}: <code>{short}</code>", force=True, replace_last=True)
-            await db.set_server_version(server["id"], version)
-
-        await show(f"{e('loading')} Создание ключа…", force=True)
-        cmd = ssh.fill(await db.get("key_cmd"), values)
+    async def run(self):
+        await self.show(f"{e('loading')} Подключение к серверу…", force=True)
         try:
-            res = await ssh.run(conn, cmd, config.key_cmd_timeout)
+            conn = await ssh.connect(creds(self.server))
         except ssh.SSHError as exc:
-            return await fail(str(exc))
+            return await self.fail(str(exc))
+        async with conn:
+            await self.show(f"{e('ok')} Подключено к <code>{escape(self.server['host'])}</code>",
+                            force=True, replace=True)
+            try:
+                if not await self.install(conn):
+                    return
+                value, filename = await self.create(conn)
+            except ssh.SSHError as exc:
+                return await self.fail(str(exc))
+            if value is None:
+                return
+
+        kid = await db.add_key(self.uid, self.server["id"], self.name, value, self.script["id"], filename)
+        await self.show(f"{e('ok')} Ключ создан", force=True, replace=True)
+        key = await db.get_key(kid, self.uid)
+        await send_key(self.msg, key, created=True)
+
+    async def check(self, conn) -> bool:
+        if not self.script["check_cmd"].strip():
+            return False
+        res = await ssh.run(conn, ssh.fill(self.script["check_cmd"], self.values), 60)
+        return res.ok
+
+    async def install(self, conn) -> bool:
+        s = self.script
+        if await db.installed_version(self.server["id"], s["id"]) == s["version"]:
+            return True
+        if await self.check(conn):
+            await self.show(f"{e('ok')} {escape(s['name'])} уже установлен на сервере", force=True)
+            await db.set_installed(self.server["id"], s["id"], s["version"])
+            return True
+        if s["filename"] and s["content"]:
+            await self.show(f"{e('upload')} Загрузка <code>{escape(s['filename'])}</code>…", force=True)
+            await ssh.upload(conn, [{"name": s["filename"], "content": s["content"]}])
+            await self.show(f"{e('ok')} Скрипт загружен", force=True, replace=True)
+        steps = steps_of(s["install_steps"], self.values)
+        if steps:
+            await self.show(f"{e('rocket')} Установка: начинаю ({len(steps)} шаг.)", force=True)
+            res = await ssh.session(conn, steps, config.install_step_timeout, self.stepper("Установка", steps))
+            if not res.ok:
+                await self.fail(f"Установка: {res.error}", res.tail())
+                return False
+            await self.show(f"{e('ok')} Установка завершена", force=True, replace=True)
+            if s["check_cmd"].strip() and not await self.check(conn):
+                await self.fail("Установка прошла, но «Проверка установки» не подтвердила результат",
+                                session_output(res.output))
+                return False
+        await db.set_installed(self.server["id"], s["id"], s["version"])
+        return True
+
+    async def create(self, conn) -> tuple[str | None, str | None]:
+        s = self.script
+        steps = steps_of(s["key_steps"], self.values)
+        if not steps:
+            await self.fail("У скрипта не заданы шаги создания ключа")
+            return None, None
+        await self.show(f"{e('loading')} Создание ключа…", force=True)
+        res = await ssh.session(conn, steps, config.key_cmd_timeout, self.stepper("Ключ", steps))
         if not res.ok:
-            return await fail(f"Команда создания ключа завершилась с кодом {res.code}", res.tail())
-
-    key = extract_key(res.stdout, await db.get("key_regex"))
-    if not key:
-        return await fail("Скрипт не вернул ключ", res.tail())
-
-    kid = await db.add_key(uid, server["id"], name, key)
-    await show(f"{e('ok')} Ключ создан", force=True, replace_last=True)
-    await send_key(status_msg, await db.get_key(kid, uid), created=True)
+            await self.fail(f"Создание ключа: {res.error}", res.tail())
+            return None, None
+        if s["result_type"] == "file":
+            path = ssh.fill(s["result_path"], self.values)
+            try:
+                data = await ssh.read_file(conn, path)
+            except ssh.SSHError as exc:
+                await self.fail(str(exc), session_output(res.output))
+                return None, None
+            return data.decode("utf-8", errors="replace"), ssh.basename(path)
+        key = extract_key(session_output(res.output), s["key_regex"])
+        if not key:
+            await self.fail("Скрипт не вернул ключ", res.tail())
+            return None, None
+        return key, None
 
 
 # ---------------- просмотр ключей ----------------
 
 def key_markup(key: dict, created: bool = False):
     value = key["value"]
+    if key.get("filename"):
+        main = btn("Скачать файл", f"k:file:{key['id']}", emoji="file", style=GREEN)
+    elif len(value) <= 256:
+        main = btn("Копировать ключ", emoji="copy", style=GREEN, copy=value)
+    else:
+        main = btn("Скачать файлом", f"k:file:{key['id']}", emoji="file", style=GREEN)
+    again = (f"k:sc:{key['server_id']}:{key['script_id']}" if key.get("script_id")
+             else f"k:srv:{key['server_id']}")
     return kb(
-        btn("Копировать ключ", emoji="copy", style=GREEN, copy=value) if len(value) <= 256 else
-        btn("Скачать файлом", f"k:file:{key['id']}", emoji="file", style=GREEN),
-        [btn("Создать ещё", f"k:srv:{key['server_id']}", emoji="key_new", style=BLUE),
+        main,
+        [btn("Создать ещё", again, emoji="key_new", style=BLUE),
          btn("Удалить", f"k:del:{key['id']}", emoji="trash", style=RED)],
         [btn("Мои ключи", "k:list:0", emoji="keys", style=BLUE), home()] if created else back("k:list:0"),
     )
@@ -250,14 +328,25 @@ def key_markup(key: dict, created: bool = False):
 def key_text(key: dict, created: bool = False) -> str:
     title = f"{e('ok')} <b>Ключ готов!</b>" if created else f"{e('keys')} <b>Ключ</b>"
     value = key["value"]
-    body = (f"<pre>{escape(value)}</pre>" if len(value) <= 3000
-            else f"{e('file')} Ключ длинный — нажмите «Скачать файлом».")
+    if key.get("filename"):
+        body = f"{e('file')} Файл <code>{escape(key['filename'])}</code> — импортируйте его в VPN-приложение."
+    elif len(value) <= 3000:
+        body = f"<pre>{escape(value)}</pre>"
+    else:
+        body = f"{e('file')} Ключ длинный — нажмите «Скачать файлом»."
     date = time.strftime("%d.%m.%Y %H:%M", time.localtime(key["created_at"]))
-    return (f"{title}\n\n{e('tag')} <code>{escape(key['name'])}</code>\n"
+    vpn = f"{e('rocket')} {escape(key['script_name'])}\n" if key.get("script_name") else ""
+    return (f"{title}\n\n{e('tag')} <code>{escape(key['name'])}</code>\n{vpn}"
             f"{e('servers')} {escape(key.get('server_name') or '—')}\n{e('calendar')} {date}\n\n{body}")
 
 
+def key_document(key: dict) -> BufferedInputFile:
+    return BufferedInputFile(key["value"].encode(), key.get("filename") or f"{key['name']}.txt")
+
+
 async def send_key(msg: Message, key: dict, created: bool = False):
+    if created and key.get("filename"):
+        await msg.answer_document(key_document(key), caption=f"{e('keys')} <code>{escape(key['name'])}</code>")
     try:
         await msg.edit_text(key_text(key, created), reply_markup=key_markup(key, created))
     except TelegramBadRequest:
@@ -277,8 +366,8 @@ async def show_list(call: CallbackQuery, db_user: dict, page: int):
         return await render(call, f"{e('keys')} <b>Мои ключи</b>\n\nКлючей пока нет.",
                             kb(btn("Создать ключ", "k:new", emoji="key_new", style=GREEN), back()))
     pages = (total + PAGE - 1) // PAGE
-    rows = [btn(f"{k['name']} · {k['server_name'] or '—'}", f"k:view:{k['id']}", emoji="keys", style=BLUE)
-            for k in keys]
+    rows = [btn(f"{k['name']} · {k['script_name'] or k['server_name'] or '—'}", f"k:view:{k['id']}",
+                emoji="keys", style=BLUE) for k in keys]
     nav = [
         btn("Назад", f"k:list:{page - 1}", emoji="back") if page > 0 else None,
         btn(f"{page + 1}/{pages}", f"k:list:{page}") if pages > 1 else None,
@@ -302,8 +391,7 @@ async def cb_file(call: CallbackQuery, db_user: dict):
     if not key:
         return await call.answer("Ключ не найден", show_alert=True)
     await call.answer()
-    await call.message.answer_document(BufferedInputFile(key["value"].encode(), f"{key['name']}.txt"),
-                                       caption=f"{e('keys')} <code>{escape(key['name'])}</code>")
+    await call.message.answer_document(key_document(key), caption=f"{e('keys')} <code>{escape(key['name'])}</code>")
 
 
 @router.callback_query(F.data.startswith("k:del:"))
@@ -311,32 +399,38 @@ async def cb_delete(call: CallbackQuery, db_user: dict):
     key = await db.get_key(int(call.data.split(":")[2]), db_user["id"])
     if not key:
         return await call.answer("Ключ не найден", show_alert=True)
-    has_cmd = bool((await db.get("delete_cmd")).strip())
-    note = "Ключ будет удалён и на сервере." if has_cmd else "Ключ удалится только из бота."
+    script = await db.get_script(key["script_id"]) if key.get("script_id") else None
+    has_steps = bool(script and script["delete_steps"].strip())
+    note = "Ключ будет удалён и на сервере." if has_steps else "Ключ удалится только из бота."
     await render(call, f"{e('warn')} Удалить ключ <code>{escape(key['name'])}</code>?\n\n{note}",
                  kb([btn("Да, удалить", f"k:delok:{key['id']}", emoji="trash", style=RED),
                      btn("Нет", f"k:view:{key['id']}", emoji="back", style=BLUE)]))
 
 
 @router.callback_query(F.data.startswith("k:delok:") | F.data.startswith("k:delforce:"))
-async def cb_delete_ok(call: CallbackQuery, state: FSMContext, db_user: dict):
+async def cb_delete_ok(call: CallbackQuery, db_user: dict):
     force = call.data.startswith("k:delforce:")
     key = await db.get_key(int(call.data.split(":")[2]), db_user["id"])
     if not key:
         return await call.answer("Ключ не найден", show_alert=True)
-    delete_cmd = (await db.get("delete_cmd")).strip()
+    script = await db.get_script(key["script_id"]) if key.get("script_id") else None
     server = await db.get_server(key["server_id"])
-    if delete_cmd and server and not force:
+    if script and script["delete_steps"].strip() and server and not force:
+        if db_user["id"] in _busy:
+            return await call.answer("Дождитесь завершения предыдущей операции", show_alert=True)
         await render(call, f"{e('loading')} Удаляю ключ <code>{escape(key['name'])}</code> на сервере…")
         error, output = "", ""
+        _busy.add(db_user["id"])
         try:
             async with await ssh.connect(creds(server)) as conn:
-                values = placeholders(server, db_user["id"], key["name"], await db.all_files())
-                res = await ssh.run(conn, ssh.fill(delete_cmd, values), config.key_cmd_timeout)
+                steps = steps_of(script["delete_steps"], placeholders(server, db_user["id"], key["name"], script))
+                res = await ssh.session(conn, steps, config.key_cmd_timeout)
             if not res.ok:
-                error, output = f"Команда удаления завершилась с кодом {res.code}", res.tail()
+                error, output = res.error, res.tail()
         except ssh.SSHError as exc:
             error = str(exc)
+        finally:
+            _busy.discard(db_user["id"])
         if error:
             out = f"\n<pre>{escape(output[-1200:])}</pre>" if output else ""
             return await render(

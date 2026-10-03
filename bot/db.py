@@ -41,7 +41,39 @@ CREATE TABLE IF NOT EXISTS settings (
     k TEXT PRIMARY KEY,
     v TEXT
 );
+CREATE TABLE IF NOT EXISTS scripts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    filename      TEXT,                     -- файл, загружаемый в ~/vpncreator
+    content       BLOB,
+    source_url    TEXT,
+    install_steps TEXT NOT NULL DEFAULT '', -- строки, которые «печатаются» в терминал
+    check_cmd     TEXT NOT NULL DEFAULT '', -- если команда успешна — установка не нужна
+    key_steps     TEXT NOT NULL DEFAULT '',
+    result_type   TEXT NOT NULL DEFAULT 'file',  -- file | output
+    result_path   TEXT NOT NULL DEFAULT '',      -- путь к файлу ключа, напр. /root/{name}.ovpn
+    key_regex     TEXT NOT NULL DEFAULT '',
+    delete_steps  TEXT NOT NULL DEFAULT '',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS server_scripts (
+    server_id  INTEGER NOT NULL,
+    script_id  INTEGER NOT NULL,
+    version    INTEGER NOT NULL,
+    PRIMARY KEY (server_id, script_id)
+);
 """
+
+MIGRATIONS = {
+    "keys": {"script_id": "INTEGER", "filename": "TEXT"},
+}
+
+SCRIPT_FIELDS = {"name", "filename", "content", "source_url", "install_steps", "check_cmd", "key_steps",
+                 "result_type", "result_path", "key_regex", "delete_steps", "enabled"}
+# изменение этих полей требует повторной установки на серверах
+REINSTALL_FIELDS = {"filename", "content", "install_steps", "check_cmd"}
 
 Row = dict[str, Any]
 
@@ -56,6 +88,12 @@ class Database:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        for table, cols in MIGRATIONS.items():
+            async with self.conn.execute(f"PRAGMA table_info({table})") as cur:
+                have = {r[1] for r in await cur.fetchall()}
+            for col, typ in cols.items():
+                if col not in have:
+                    await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         await self.conn.commit()
 
     async def close(self) -> None:
@@ -149,31 +187,75 @@ class Database:
 
     async def delete_server(self, sid: int) -> None:
         await self._exec("DELETE FROM keys WHERE server_id=?", (sid,))
+        await self._exec("DELETE FROM server_scripts WHERE server_id=?", (sid,))
         await self._exec("DELETE FROM servers WHERE id=?", (sid,))
 
-    async def set_server_version(self, sid: int, version: int) -> None:
-        await self._exec("UPDATE servers SET installed_version=? WHERE id=?", (version, sid))
+    # ---------- установленные скрипты на серверах ----------
+    async def installed_version(self, sid: int, script_id: int) -> int | None:
+        row = await self._one("SELECT version FROM server_scripts WHERE server_id=? AND script_id=?",
+                              (sid, script_id))
+        return row["version"] if row else None
+
+    async def set_installed(self, sid: int, script_id: int, version: int) -> None:
+        await self._exec(
+            "INSERT INTO server_scripts (server_id, script_id, version) VALUES (?,?,?) "
+            "ON CONFLICT(server_id, script_id) DO UPDATE SET version=excluded.version",
+            (sid, script_id, version))
+
+    async def reset_installed(self, sid: int) -> None:
+        await self._exec("DELETE FROM server_scripts WHERE server_id=?", (sid,))
+
+    # ---------- скрипты ----------
+    async def add_script(self, **fields) -> int:
+        fields = {k: v for k, v in fields.items() if k in SCRIPT_FIELDS}
+        cols = ", ".join(fields) + ", created_at"
+        marks = ", ".join("?" * len(fields)) + ", ?"
+        return await self._exec(f"INSERT INTO scripts ({cols}) VALUES ({marks})",
+                                (*fields.values(), int(time.time())))
+
+    async def get_script(self, script_id: int) -> Row | None:
+        return await self._one("SELECT * FROM scripts WHERE id=?", (script_id,))
+
+    async def list_scripts(self, only_enabled: bool = False) -> list[Row]:
+        where = "WHERE enabled=1" if only_enabled else ""
+        return await self._all(
+            f"SELECT id, name, filename, enabled, version, length(content) AS size FROM scripts {where} ORDER BY id")
+
+    async def update_script(self, script_id: int, **fields) -> None:
+        fields = {k: v for k, v in fields.items() if k in SCRIPT_FIELDS}
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        if REINSTALL_FIELDS & fields.keys():
+            sets += ", version=version+1"
+        await self._exec(f"UPDATE scripts SET {sets} WHERE id=?", (*fields.values(), script_id))
+
+    async def bump_script(self, script_id: int) -> None:
+        await self._exec("UPDATE scripts SET version=version+1 WHERE id=?", (script_id,))
+
+    async def delete_script(self, script_id: int) -> None:
+        await self._exec("DELETE FROM server_scripts WHERE script_id=?", (script_id,))
+        await self._exec("UPDATE keys SET script_id=NULL WHERE script_id=?", (script_id,))
+        await self._exec("DELETE FROM scripts WHERE id=?", (script_id,))
 
     # ---------- keys ----------
-    async def add_key(self, owner_id: int, server_id: int, name: str, value: str) -> int:
+    async def add_key(self, owner_id: int, server_id: int, name: str, value: str,
+                      script_id: int | None = None, filename: str | None = None) -> int:
         return await self._exec(
-            "INSERT INTO keys (owner_id, server_id, name, value, created_at) VALUES (?,?,?,?,?)",
-            (owner_id, server_id, name, value, int(time.time())),
+            "INSERT INTO keys (owner_id, server_id, name, value, created_at, script_id, filename) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (owner_id, server_id, name, value, int(time.time()), script_id, filename),
         )
+
+    _KEY_SELECT = ("SELECT k.*, s.name AS server_name, sc.name AS script_name FROM keys k "
+                   "LEFT JOIN servers s ON s.id=k.server_id LEFT JOIN scripts sc ON sc.id=k.script_id ")
 
     async def get_key(self, kid: int, owner_id: int) -> Row | None:
-        return await self._one(
-            "SELECT k.*, s.name AS server_name FROM keys k LEFT JOIN servers s ON s.id=k.server_id "
-            "WHERE k.id=? AND k.owner_id=?",
-            (kid, owner_id),
-        )
+        return await self._one(self._KEY_SELECT + "WHERE k.id=? AND k.owner_id=?", (kid, owner_id))
 
     async def list_keys(self, owner_id: int, offset: int, limit: int) -> list[Row]:
-        return await self._all(
-            "SELECT k.*, s.name AS server_name FROM keys k LEFT JOIN servers s ON s.id=k.server_id "
-            "WHERE k.owner_id=? ORDER BY k.id DESC LIMIT ? OFFSET ?",
-            (owner_id, limit, offset),
-        )
+        return await self._all(self._KEY_SELECT + "WHERE k.owner_id=? ORDER BY k.id DESC LIMIT ? OFFSET ?",
+                               (owner_id, limit, offset))
 
     async def count_keys(self, owner_id: int | None = None) -> int:
         if owner_id is None:
@@ -187,26 +269,6 @@ class Database:
     async def delete_key(self, kid: int) -> None:
         await self._exec("DELETE FROM keys WHERE id=?", (kid,))
 
-    # ---------- files (скрипты) ----------
-    async def list_files(self) -> list[Row]:
-        return await self._all("SELECT id, name, length(content) AS size FROM files ORDER BY id")
-
-    async def all_files(self) -> list[Row]:
-        return await self._all("SELECT name, content FROM files ORDER BY id")
-
-    async def put_file(self, name: str, content: bytes) -> None:
-        await self._exec(
-            "INSERT INTO files (name, content) VALUES (?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET content=excluded.content",
-            (name, content),
-        )
-
-    async def get_file(self, fid: int) -> Row | None:
-        return await self._one("SELECT id, name FROM files WHERE id=?", (fid,))
-
-    async def delete_file(self, fid: int) -> None:
-        await self._exec("DELETE FROM files WHERE id=?", (fid,))
-
     # ---------- settings ----------
     async def get(self, k: str, default: str = "") -> str:
         row = await self._one("SELECT v FROM settings WHERE k=?", (k,))
@@ -215,11 +277,3 @@ class Database:
     async def set(self, k: str, v: str) -> None:
         await self._exec(
             "INSERT INTO settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
-
-    async def config_version(self) -> int:
-        return int(await self.get("config_version", "1"))
-
-    async def bump_version(self) -> int:
-        v = await self.config_version() + 1
-        await self.set("config_version", str(v))
-        return v
