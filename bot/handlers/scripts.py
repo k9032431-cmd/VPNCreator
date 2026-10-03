@@ -53,8 +53,10 @@ def pretty_steps(steps: list[str], limit: int = 2500) -> str:
         return "<i>пока пусто</i>"
     out, size = [], 0
     for i, s in enumerate(steps, 1):
-        shown = "⏎ Enter" if s.strip().lower() in ENTER_WORDS else s
-        line = f"<code>{i:>2}.</code> <code>{escape(shown)}</code>"
+        if s.strip().lower() in ENTER_WORDS:
+            line = f"<code>{i:>2}.</code> {e('enter')} Enter"
+        else:
+            line = f"<code>{i:>2}.</code> <code>{escape(s)}</code>"
         size += len(line)
         if size > limit:
             out.append(f"… ещё {len(steps) - i + 1}")

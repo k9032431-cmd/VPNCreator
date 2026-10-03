@@ -9,7 +9,7 @@ class Config(BaseSettings):
     admin_ids: str = ""
     secret_key: str
     db_path: str = "data/bot.db"
-    bot_title: str = "VPN Creator"
+    bot_title: str = "OpenVPN Creator"
 
     # Таймауты SSH (секунды)
     install_step_timeout: int = 1800

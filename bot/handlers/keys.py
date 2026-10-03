@@ -349,8 +349,8 @@ def key_caption(key: dict) -> str:
     if (key.get("filename") or "").lower().endswith(".ovpn"):
         text += (
             f"\n\n{e('tip')} <b>Как открыть в OpenVPN:</b>\n"
-            "📱 <b>Android:</b> ⋮ у файла → «Поделиться» → <b>OpenVPN Connect</b>\n"
-            "🍏 <b>iPhone:</b> нажмите на файл → «Поделиться» → <b>OpenVPN</b>\n"
+            f"{e('android')} <b>Android:</b> ⋮ у файла → «Поделиться» → <b>OpenVPN Connect</b>\n"
+            f"{e('iphone')} <b>iPhone:</b> нажмите на файл → «Поделиться» → <b>OpenVPN</b>\n"
             "Или в OpenVPN Connect: <b>Import Profile → Upload File</b> → папка "
             "<code>Download/Telegram</code>"
         )

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPN Creator — установка Telegram-бота одной командой.
+# OpenVPN Creator — установка Telegram-бота одной командой.
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/k9032431-cmd/VPNCreator/HEAD/install.sh)
 #
@@ -149,7 +149,7 @@ configure() {
   else
     ok "SECRET_KEY сохранён прежний"
   fi
-  [[ -z "$title" ]] && title="VPN Creator"
+  [[ -z "$title" ]] && title="OpenVPN Creator"
 
   umask 077
   cat > "$env" <<EOF
@@ -174,7 +174,7 @@ setup_service() {
 
   cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 [Unit]
-Description=VPN Creator Telegram bot
+Description=OpenVPN Creator Telegram bot
 After=network-online.target
 Wants=network-online.target
 
@@ -199,7 +199,7 @@ EOF
   # systemd видит его и запускает обновление от root.
   cat > "/etc/systemd/system/$SERVICE-update.path" <<EOF
 [Unit]
-Description=VPN Creator: update request from the bot
+Description=OpenVPN Creator: update request from the bot
 
 [Path]
 PathExists=$INSTALL_DIR/data/update.request
@@ -210,7 +210,7 @@ WantedBy=multi-user.target
 EOF
   cat > "/etc/systemd/system/$SERVICE-update.service" <<EOF
 [Unit]
-Description=VPN Creator: self-update
+Description=OpenVPN Creator: self-update
 
 [Service]
 Type=oneshot
@@ -285,7 +285,7 @@ EOF
 
 cmd_install() {
   need_root
-  echo -e "${W}VPN Creator — установка${N}"
+  echo -e "${W}OpenVPN Creator — установка${N}"
   install_packages
   fetch_code
   setup_venv
@@ -370,7 +370,7 @@ cmd_uninstall() {
 
 usage() {
   cat <<EOF
-${W}vpncreator${N} — управление ботом VPN Creator
+${W}vpncreator${N} — управление ботом OpenVPN Creator
 
   install    установить / переустановить
   update     обновить из GitHub
