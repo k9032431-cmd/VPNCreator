@@ -1,5 +1,6 @@
 import re
 import secrets
+import shlex
 import time
 from html import escape
 
@@ -25,12 +26,12 @@ _busy: set[int] = set()
 
 
 def placeholders(server: dict, user_id: int, name: str, script: dict | None) -> dict[str, str]:
-    file = f"{ssh.REMOTE_DIR_SH}/{script['filename']}" if script and script.get("filename") else ""
+    file = f"{ssh.DIR_SH}/{shlex.quote(script['filename'])}" if script and script.get("filename") else ""
     return {
         "name": name,
         "user_id": str(user_id),
         "server_ip": server["host"],
-        "dir": ssh.REMOTE_DIR_SH,
+        "dir": ssh.DIR_SH,
         "file": file,
         "script": file,
     }
@@ -249,7 +250,7 @@ class Creation:
     async def check(self, conn) -> bool:
         if not self.script["check_cmd"].strip():
             return False
-        res = await ssh.run(conn, ssh.fill(self.script["check_cmd"], self.values), 60)
+        res = await conn.run(ssh.fill(self.script["check_cmd"], self.values), 60)
         return res.ok
 
     async def install(self, conn) -> bool:
@@ -262,12 +263,12 @@ class Creation:
             return True
         if s["filename"] and s["content"]:
             await self.show(f"{e('upload')} Загрузка <code>{escape(s['filename'])}</code>…", force=True)
-            await ssh.upload(conn, [{"name": s["filename"], "content": s["content"]}])
+            await conn.upload([{"name": s["filename"], "content": s["content"]}])
             await self.show(f"{e('ok')} Скрипт загружен", force=True, replace=True)
         steps = steps_of(s["install_steps"], self.values)
         if steps:
             await self.show(f"{e('rocket')} Установка: начинаю ({len(steps)} шаг.)", force=True)
-            res = await ssh.session(conn, steps, config.install_step_timeout, self.stepper("Установка", steps))
+            res = await conn.session(steps, config.install_step_timeout, self.stepper("Установка", steps))
             if not res.ok:
                 await self.fail(f"Установка: {res.error}", res.tail())
                 return False
@@ -286,14 +287,14 @@ class Creation:
             await self.fail("У скрипта не заданы шаги создания ключа")
             return None, None
         await self.show(f"{e('loading')} Создание ключа…", force=True)
-        res = await ssh.session(conn, steps, config.key_cmd_timeout, self.stepper("Ключ", steps))
+        res = await conn.session(steps, config.key_cmd_timeout, self.stepper("Ключ", steps))
         if not res.ok:
             await self.fail(f"Создание ключа: {res.error}", res.tail())
             return None, None
         if s["result_type"] == "file":
             path = ssh.fill(s["result_path"], self.values)
             try:
-                data = await ssh.read_file(conn, path)
+                data = await conn.read_file(path)
             except ssh.SSHError as exc:
                 await self.fail(str(exc), session_output(res.output))
                 return None, None
@@ -437,7 +438,7 @@ async def cb_delete_ok(call: CallbackQuery, db_user: dict):
         try:
             async with await ssh.connect(creds(server)) as conn:
                 steps = steps_of(script["delete_steps"], placeholders(server, db_user["id"], key["name"], script))
-                res = await ssh.session(conn, steps, config.key_cmd_timeout)
+                res = await conn.session(steps, config.key_cmd_timeout)
             if not res.ok:
                 error, output = res.error, res.tail()
         except ssh.SSHError as exc:

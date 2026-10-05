@@ -27,7 +27,8 @@ def creds(server: dict) -> ssh.Creds:
         key, _, passphrase = secret.partition("\n\x00PASS\x00\n")
         return ssh.Creds(server["host"], server["port"], server["username"],
                          password=passphrase or None, private_key=key)
-    return ssh.Creds(server["host"], server["port"], server["username"], password=secret)
+    # При входе не под root пароль от сервера используется и для sudo
+    return ssh.Creds(server["host"], server["port"], server["username"], password=secret, sudo_password=secret)
 
 
 def valid_host(host: str) -> bool:
@@ -71,6 +72,7 @@ async def server_card(server: dict) -> str:
         f"{e('plug')} Порт: <code>{server['port']}</code>\n"
         f"{e('user')} Логин: <code>{escape(server['username'])}</code>\n"
         f"{auth}\n"
+        f"{e('star')} Права: {'root' if server['username'] == 'root' else 'root через sudo'}\n"
         f"{e('keys')} Ключей: <b>{keys}</b>\n"
         f"{e('file')} VPN:{scripts}"
     )
@@ -102,7 +104,8 @@ async def cb_check(call: CallbackQuery, db_user: dict):
     await call.answer("Проверяю подключение…")
     try:
         async with await ssh.connect(creds(server)) as conn:
-            res = await ssh.run(conn, "uname -sr; (. /etc/os-release && echo $PRETTY_NAME) 2>/dev/null; uptime -p", 30)
+            await conn.check_root()
+            res = await conn.run("uname -sr; (. /etc/os-release && echo $PRETTY_NAME) 2>/dev/null; uptime -p", 30)
         result = f"{e('ok')} <b>Подключение успешно</b>\n<pre>{escape(res.tail(800))}</pre>"
     except ssh.SSHError as exc:
         result = f"{e('error')} <b>Ошибка:</b> {escape(str(exc))}"
@@ -335,7 +338,7 @@ async def _save(target: Message | CallbackQuery, state: FSMContext, db_user: dic
               "auth_type": data["auth_type"], "secret": data["secret"]}
     try:
         async with await ssh.connect(creds(server)) as conn:
-            await ssh.run(conn, "true", 30)
+            await conn.check_root()  # для не-root проверяем, что sudo работает
     except ssh.SSHError as exc:
         await state.set_state(AddServer.host)
         await state.update_data(prompt_id=msg.message_id)
