@@ -7,7 +7,7 @@ from html import escape
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InputMediaDocument, Message
 
 from .. import ssh
 from ..common import CreateKey, HasAccess, db
@@ -55,24 +55,32 @@ def extract_key(output: str, regex: str) -> str:
 
 
 # ---------------- выбор сервера и скрипта ----------------
+# Префикс callback: "k" — один ключ, "kb" — несколько ключей сразу
 
-@router.callback_query(F.data == "k:new")
+def _title(mode: str) -> str:
+    return "Создание ключа" if mode == "k" else "Создание нескольких ключей"
+
+
+@router.callback_query(F.data.in_({"k:new", "kb:new"}))
 async def cb_new(call: CallbackQuery, state: FSMContext, db_user: dict):
     await state.clear()
+    mode = call.data.split(":")[0]
     servers = await db.list_servers(db_user["id"])
     if not servers:
         return await render(
             call,
-            f"{e('key_new')} <b>Создание ключа</b>\n\nСначала подключите хотя бы один сервер.",
+            f"{e('key_new')} <b>{_title(mode)}</b>\n\nСначала подключите хотя бы один сервер.",
             kb(btn("Подключить VPS", "s:add", emoji="server_add", style=GREEN), back()),
         )
-    rows = [btn(f"{s['name']} · {s['host']}", f"k:srv:{s['id']}", emoji="servers", style=BLUE) for s in servers]
-    await render(call, f"{e('key_new')} <b>Создание ключа</b>\n\n{e('point_down')} На каком сервере создать ключ?",
+    rows = [btn(f"{s['name']} · {s['host']}", f"{mode}:srv:{s['id']}", emoji="servers", style=BLUE)
+            for s in servers]
+    await render(call, f"{e('key_new')} <b>{_title(mode)}</b>\n\n{e('point_down')} На каком сервере?",
                  kb(*rows, back()))
 
 
-@router.callback_query(F.data.regexp(r"^k:srv:\d+$"))
+@router.callback_query(F.data.regexp(r"^kb?:srv:\d+$"))
 async def cb_server(call: CallbackQuery, state: FSMContext, db_user: dict):
+    mode = call.data.split(":")[0]
     server = await db.get_server(int(call.data.split(":")[2]), db_user["id"])
     if not server:
         return await call.answer("Сервер не найден", show_alert=True)
@@ -84,20 +92,33 @@ async def cb_server(call: CallbackQuery, state: FSMContext, db_user: dict):
             kb(back()),
         )
     if len(scripts) == 1:
-        return await ask_name(call, state, server, scripts[0])
-    rows = [btn(s["name"], f"k:sc:{server['id']}:{s['id']}", emoji="rocket", style=BLUE) for s in scripts]
-    await render(call, f"{e('key_new')} <b>Создание ключа</b> · {e('servers')} {escape(server['name'])}\n\n"
-                       f"{e('point_down')} Какой VPN нужен?", kb(*rows, back("k:new")))
+        return await ask_names(call, state, server, scripts[0], mode)
+    rows = [btn(s["name"], f"{mode}:sc:{server['id']}:{s['id']}", emoji="rocket", style=BLUE) for s in scripts]
+    await render(call, f"{e('key_new')} <b>{_title(mode)}</b> · {e('servers')} {escape(server['name'])}\n\n"
+                       f"{e('point_down')} Какой VPN нужен?", kb(*rows, back(f"{mode}:new")))
 
 
-@router.callback_query(F.data.regexp(r"^k:sc:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^kb?:sc:\d+:\d+$"))
 async def cb_script(call: CallbackQuery, state: FSMContext, db_user: dict):
-    _, _, sid, scid = call.data.split(":")
+    mode, _, sid, scid = call.data.split(":")
     server = await db.get_server(int(sid), db_user["id"])
     script = await db.get_script(int(scid))
     if not server or not script or not script["enabled"]:
         return await call.answer("Сервер или скрипт не найден", show_alert=True)
-    await ask_name(call, state, server, script)
+    await ask_names(call, state, server, script, mode)
+
+
+async def ask_names(call: CallbackQuery, state: FSMContext, server: dict, script: dict, mode: str):
+    if mode == "kb":
+        await state.set_state(CreateKey.bulk)
+        await state.update_data(server_id=server["id"], script_id=script["id"], names=[], errors=[])
+        text, markup = bulk_screen(server, script["name"], [], [])
+    else:
+        await state.set_state(CreateKey.name)
+        await state.update_data(server_id=server["id"], script_id=script["id"])
+        text, markup = name_prompt(server, script["name"]), NAME_KB
+    msg = await render(call, text, markup)
+    await state.update_data(prompt_id=msg.message_id)
 
 
 def name_prompt(server: dict, script_name: str, error: str = "") -> str:
@@ -110,17 +131,10 @@ def name_prompt(server: dict, script_name: str, error: str = "") -> str:
 NAME_KB = kb(btn("Автоматически", "k:auto", emoji="auto", style=GREEN), cancel().inline_keyboard[0])
 
 
-async def ask_name(call: CallbackQuery, state: FSMContext, server: dict, script: dict):
-    await state.set_state(CreateKey.name)
-    await state.update_data(server_id=server["id"], script_id=script["id"])
-    msg = await render(call, name_prompt(server, script["name"]), NAME_KB)
-    await state.update_data(prompt_id=msg.message_id)
-
-
 @router.callback_query(CreateKey.name, F.data == "k:auto")
 async def cb_auto(call: CallbackQuery, state: FSMContext, db_user: dict):
     await call.answer()
-    await start_creation(call.message, state, db_user, f"u{db_user['id']}_{secrets.token_hex(3)}")
+    await start_creation(call.message, state, db_user, [auto_name(db_user["id"])])
 
 
 @router.message(CreateKey.name, F.text)
@@ -146,12 +160,105 @@ async def in_name(message: Message, state: FSMContext, db_user: dict):
         except (TelegramBadRequest, KeyError):
             await message.answer(text, reply_markup=NAME_KB)
         return
-    await start_creation(message, state, db_user, name)
+    await start_creation(message, state, db_user, [name])
+
+
+def auto_name(uid: int) -> str:
+    return f"u{uid}_{secrets.token_hex(3)}"
+
+
+# ---------------- несколько ключей ----------------
+
+MAX_BULK = 50
+
+
+def bulk_screen(server: dict, script_name: str, names: list[str], errors: list[str]):
+    listing = "\n".join(f"<code>{i:>2}.</code> <code>{escape(n)}</code>" for i, n in enumerate(names, 1)) \
+        or "<i>пока пусто</i>"
+    err = ("\n\n" + "\n".join(f"{e('error')} {escape(x)}" for x in errors[-8:])) if errors else ""
+    text = (f"{e('keys')} <b>Создание нескольких ключей</b> · {escape(script_name)} · "
+            f"{e('servers')} {escape(server['name'])}\n\n"
+            f"{e('tag')} Отправьте <b>названия ключей</b> — каждое с новой строки, одним сообщением "
+            f"или по одному. Латиница, цифры, <code>-</code> и <code>_</code>.\n"
+            f"{e('auto')} Или отправьте число (например <code>5</code>) — бот придумает названия сам.\n\n"
+            f"<b>Ключи ({len(names)}/{MAX_BULK}):</b>\n{listing}{err}")
+    rows = []
+    if names:
+        rows.append(btn(f"Создать {len(names)} шт.", "kb:go", emoji="ok", style=GREEN))
+        rows.append([btn("Убрать последний", "kb:undo", emoji="back", style=BLUE),
+                     btn("Очистить", "kb:clear", emoji="trash", style=RED)])
+    rows.append(cancel().inline_keyboard[0])
+    return text, kb(*rows)
+
+
+async def _bulk_refresh(target: Message | CallbackQuery, state: FSMContext, db_user: dict):
+    data = await state.get_data()
+    server = await db.get_server(data["server_id"], db_user["id"])
+    script = await db.get_script(data["script_id"])
+    text, markup = bulk_screen(server, script["name"] if script else "", data.get("names", []),
+                               data.get("errors", []))
+    if isinstance(target, CallbackQuery):
+        return await render(target, text, markup)
+    try:
+        await target.bot.edit_message_text(text, chat_id=target.chat.id, message_id=data["prompt_id"],
+                                           reply_markup=markup)
+    except (TelegramBadRequest, KeyError) as exc:
+        if "not modified" not in str(exc):
+            msg = await target.answer(text, reply_markup=markup)
+            await state.update_data(prompt_id=msg.message_id)
+
+
+@router.message(CreateKey.bulk, F.text)
+async def in_bulk_names(message: Message, state: FSMContext, db_user: dict):
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+    data = await state.get_data()
+    names: list[str] = list(data.get("names", []))
+    errors: list[str] = []
+    for raw in message.text.replace(",", "\n").splitlines():
+        token = raw.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            count = min(int(token), MAX_BULK - len(names))
+            names += [auto_name(db_user["id"]) for _ in range(count)]
+            continue
+        if not NAME_RE.match(token):
+            errors.append(f"«{token[:40]}»: только латиница, цифры, - и _ (до 32 символов)")
+        elif token in names:
+            errors.append(f"«{token}» уже в списке")
+        elif await db.key_name_exists(data["server_id"], token):
+            errors.append(f"«{token}» уже есть на этом сервере")
+        elif len(names) >= MAX_BULK:
+            errors.append(f"Не больше {MAX_BULK} ключей за раз")
+            break
+        else:
+            names.append(token)
+    await state.update_data(names=names, errors=errors)
+    await _bulk_refresh(message, state, db_user)
+
+
+@router.callback_query(CreateKey.bulk, F.data.in_({"kb:undo", "kb:clear"}))
+async def cb_bulk_edit(call: CallbackQuery, state: FSMContext, db_user: dict):
+    names = (await state.get_data()).get("names", [])
+    await state.update_data(names=names[:-1] if call.data == "kb:undo" else [], errors=[])
+    await _bulk_refresh(call, state, db_user)
+
+
+@router.callback_query(CreateKey.bulk, F.data == "kb:go")
+async def cb_bulk_go(call: CallbackQuery, state: FSMContext, db_user: dict):
+    names = (await state.get_data()).get("names", [])
+    if not names:
+        return await call.answer("Добавьте хотя бы одно название", show_alert=True)
+    await call.answer()
+    await start_creation(call.message, state, db_user, names)
 
 
 # ---------------- создание ключа ----------------
 
-async def start_creation(message: Message, state: FSMContext, db_user: dict, name: str):
+async def start_creation(message: Message, state: FSMContext, db_user: dict, names: list[str]):
     data = await state.get_data()
     await state.clear()
     uid = db_user["id"]
@@ -176,20 +283,23 @@ async def start_creation(message: Message, state: FSMContext, db_user: dict, nam
                                           reply_markup=kb(home()))
     _busy.add(uid)
     try:
-        await Creation(status_msg, server, script, uid, name).run()
+        await Creation(status_msg, server, script, uid, names).run()
     finally:
         _busy.discard(uid)
 
 
 class Creation:
-    """Подключение → установка (один раз) → создание ключа → отправка пользователю."""
+    """Подключение → установка (один раз) → создание ключей → отправка пользователю."""
 
-    def __init__(self, msg: Message, server: dict, script: dict, uid: int, name: str):
-        self.msg, self.server, self.script, self.uid, self.name = msg, server, script, uid, name
-        self.values = placeholders(server, uid, name, script)
+    def __init__(self, msg: Message, server: dict, script: dict, uid: int, names: list[str]):
+        self.msg, self.server, self.script, self.uid, self.names = msg, server, script, uid, names
+        self.bulk = len(names) > 1
+        self.values = placeholders(server, uid, names[0], script)
         self.log: list[str] = []
         self.last_edit = 0.0
-        self.header = (f"{e('key_new')} <b>Создание ключа</b> <code>{escape(name)}</code>\n"
+        what = (f"<b>Создание ключей</b> — {len(names)} шт." if self.bulk
+                else f"<b>Создание ключа</b> <code>{escape(names[0])}</code>")
+        self.header = (f"{e('key_new')} {what}\n"
                        f"{e('rocket')} {escape(script['name'])} · {e('servers')} {escape(server['name'])}\n\n")
 
     async def show(self, line: str | None = None, *, force: bool = False, replace: bool = False):
@@ -202,14 +312,15 @@ class Creation:
             return
         self.last_edit = time.monotonic()
         try:
-            await self.msg.edit_text(self.header + "\n".join(self.log[-12:]))
+            await self.msg.edit_text(self.header + "\n".join(self.log[-14:]))
         except TelegramBadRequest:
             pass
 
     async def fail(self, error: str, output: str = ""):
         out = f"\n\n<b>Вывод:</b>\n<pre>{escape(output.strip()[-1500:])}</pre>" if output.strip() else ""
         text = self.header + "\n".join(self.log[-10:]) + f"\n\n{e('error')} <b>{escape(error)}</b>{out}"
-        markup = kb(btn("Попробовать снова", f"k:sc:{self.server['id']}:{self.script['id']}",
+        retry = "kb:sc" if self.bulk else "k:sc"
+        markup = kb(btn("Попробовать снова", f"{retry}:{self.server['id']}:{self.script['id']}",
                         emoji="refresh", style=GREEN), home())
         try:
             await self.msg.edit_text(text[-4000:], reply_markup=markup)
@@ -220,8 +331,9 @@ class Creation:
         async def on_step(i: int, line: str):
             shown = "Enter" if line.strip().lower() in ssh.ENTER_WORDS else line
             shown = escape(shown if len(shown) <= 50 else shown[:47] + "…")
+            # заменяем строку «начинаю/создаю…» или предыдущий шаг
             await self.show(f"{e('rocket')} {title}: шаг {i}/{len(steps)} · <code>{shown}</code>",
-                            replace=i > 1)
+                            replace=True)
         return on_step
 
     async def run(self):
@@ -230,22 +342,42 @@ class Creation:
             conn = await ssh.connect(creds(self.server))
         except ssh.SSHError as exc:
             return await self.fail(str(exc))
+        created: list[dict] = []
+        failed: list[tuple[str, str]] = []
         async with conn:
             await self.show(f"{e('ok')} Подключено к <code>{escape(self.server['host'])}</code>",
                             force=True, replace=True)
             try:
                 if not await self.install(conn):
                     return
-                value, filename = await self.create(conn)
             except ssh.SSHError as exc:
                 return await self.fail(str(exc))
-            if value is None:
-                return
+            for i, name in enumerate(self.names, 1):
+                title = f"Ключ {i}/{len(self.names)} <code>{escape(name)}</code>" if self.bulk else "Ключ"
+                try:
+                    value, filename, error, output = await self.create(conn, name, title)
+                except ssh.SSHError as exc:  # соединение потеряно — остальные не создать
+                    value, error, output = None, str(exc), ""
+                    failed += [(n, "не создан: связь с сервером прервалась") for n in self.names[i:]]
+                    if not self.bulk:
+                        return await self.fail(error)
+                    failed.insert(len(failed) - len(self.names[i:]), (name, error))
+                    break
+                if value is None:
+                    if not self.bulk:
+                        return await self.fail(error, output)
+                    failed.append((name, error))
+                    await self.show(f"{e('error')} <code>{escape(name)}</code>: {escape(error[:120])}",
+                                    force=True, replace=True)
+                    continue
+                kid = await db.add_key(self.uid, self.server["id"], name, value, self.script["id"], filename)
+                created.append(await db.get_key(kid, self.uid))
+                await self.show(f"{e('ok')} <code>{escape(name)}</code>", force=True, replace=True)
 
-        kid = await db.add_key(self.uid, self.server["id"], self.name, value, self.script["id"], filename)
-        await self.show(f"{e('ok')} Ключ создан", force=True, replace=True)
-        key = await db.get_key(kid, self.uid)
-        await send_key(self.msg, key, created=True)
+        if not self.bulk:
+            await self.show(f"{e('ok')} Ключ создан", force=True, replace=True)
+            return await send_key(self.msg, created[0], created=True)
+        await send_bulk(self.msg, self.header, created, failed, self.server["id"], self.script["id"])
 
     async def check(self, conn) -> bool:
         if not self.script["check_cmd"].strip():
@@ -280,30 +412,64 @@ class Creation:
         await db.set_installed(self.server["id"], s["id"], s["version"])
         return True
 
-    async def create(self, conn) -> tuple[str | None, str | None]:
+    async def create(self, conn, name: str, title: str) -> tuple[str | None, str | None, str, str]:
+        """→ (ключ, имя файла, ошибка, вывод). Ключ None — не получилось."""
         s = self.script
-        steps = steps_of(s["key_steps"], self.values)
+        values = placeholders(self.server, self.uid, name, s)
+        steps = steps_of(s["key_steps"], values)
         if not steps:
-            await self.fail("У скрипта не заданы шаги создания ключа")
-            return None, None
-        await self.show(f"{e('loading')} Создание ключа…", force=True)
-        res = await conn.session(steps, config.key_cmd_timeout, self.stepper("Ключ", steps))
+            return None, None, "У скрипта не заданы шаги создания ключа", ""
+        await self.show(f"{e('loading')} {title}: создаю…", force=True)
+        res = await conn.session(steps, config.key_cmd_timeout, self.stepper(title, steps))
         if not res.ok:
-            await self.fail(f"Создание ключа: {res.error}", res.tail())
-            return None, None
+            return None, None, f"Создание ключа: {res.error}", res.tail()
         if s["result_type"] == "file":
-            path = ssh.fill(s["result_path"], self.values)
+            path = ssh.fill(s["result_path"], values)
             try:
                 data = await conn.read_file(path)
             except ssh.SSHError as exc:
-                await self.fail(str(exc), session_output(res.output))
-                return None, None
-            return data.decode("utf-8", errors="replace"), ssh.basename(path)
+                return None, None, str(exc), session_output(res.output)
+            return data.decode("utf-8", errors="replace"), ssh.basename(path), "", ""
         key = extract_key(session_output(res.output), s["key_regex"])
         if not key:
-            await self.fail("Скрипт не вернул ключ", res.tail())
-            return None, None
-        return key, None
+            return None, None, "Скрипт не вернул ключ", res.tail()
+        return key, None, "", ""
+
+
+async def send_bulk(msg: Message, header: str, created: list[dict], failed: list[tuple[str, str]],
+                    server_id: int, script_id: int):
+    """Итог пакетного создания: сводка + все ключи (файлы альбомами по 10, текстовые — одним файлом)."""
+    total = len(created) + len(failed)
+    lines = [f"{e('ok')} <code>{escape(k['name'])}</code>" for k in created]
+    lines += [f"{e('error')} <code>{escape(n)}</code> — {escape(err[:150])}" for n, err in failed]
+    title = (f"{e('ok')} <b>Готово: {len(created)} из {total}</b>" if not failed
+             else f"{e('warn')} <b>Создано {len(created)} из {total}</b>")
+    markup = kb(btn("Создать ещё", f"kb:sc:{server_id}:{script_id}", emoji="key_new", style=GREEN),
+                [btn("Мои ключи", "k:list:0", emoji="keys", style=BLUE), home()])
+    summary = header + title + "\n\n" + "\n".join(lines)
+    if len(summary) > 4000:
+        summary = header + title + "\n\n" + "\n".join(lines[:60]) + f"\n… и ещё {len(lines) - 60}"
+    try:
+        await msg.edit_text(summary, reply_markup=markup)
+    except TelegramBadRequest:
+        await msg.answer(summary, reply_markup=markup)
+
+    files = [k for k in created if k.get("filename")]
+    for i in range(0, len(files), 10):
+        group = files[i:i + 10]
+        if len(group) == 1:
+            await msg.answer_document(key_document(group[0]), caption=key_caption(group[0]))
+            continue
+        last = i + 10 >= len(files)
+        media = [InputMediaDocument(media=key_document(k),
+                                    caption=key_caption(k) if last and j == len(group) - 1 else None)
+                 for j, k in enumerate(group)]
+        await msg.answer_media_group(media)
+    texts = [k for k in created if not k.get("filename")]
+    if texts:
+        body = "\n\n".join(f"{k['name']}\n{k['value']}" for k in texts)
+        await msg.answer_document(BufferedInputFile(body.encode(), "keys.txt"),
+                                  caption=f"{e('keys')} Ключи: {len(texts)} шт.")
 
 
 # ---------------- просмотр ключей ----------------

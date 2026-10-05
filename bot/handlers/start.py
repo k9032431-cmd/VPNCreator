@@ -15,7 +15,8 @@ router = Router(name="start")
 
 def main_menu(is_admin: bool):
     return kb(
-        btn("Создать ключ", "k:new", emoji="key_new", style=GREEN),
+        [btn("Создать ключ", "k:new", emoji="key_new", style=GREEN),
+         btn("Несколько ключей", "kb:new", emoji="keys", style=GREEN)],
         [btn("Мои ключи", "k:list:0", emoji="keys", style=BLUE),
          btn("Мои серверы", "s:list", emoji="servers", style=BLUE)],
         [btn("Подключить VPS", "s:add", emoji="server_add", style=BLUE),

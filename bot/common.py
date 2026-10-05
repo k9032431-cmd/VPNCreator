@@ -50,6 +50,7 @@ class AddServer(StatesGroup):
 
 class CreateKey(StatesGroup):
     name = State()
+    bulk = State()
 
 
 class Settings(StatesGroup):
