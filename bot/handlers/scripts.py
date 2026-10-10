@@ -31,6 +31,12 @@ STEP_FIELDS = {
                   "Название ключа — <code>{name}</code>."),
     "delete_steps": ("trash", "Удаление ключа",
                      "Необязательно. Выполняется, когда пользователь удаляет ключ."),
+    "ip_steps": ("globe", "Смена IP",
+                 "Необязательно. Выполняется, когда в боте меняют IP сервера (кнопка «Сменить IP»), — "
+                 "чтобы новые ключи выдавались с новым IP. Подстановки: <code>{old_ip}</code>, "
+                 "<code>{new_ip}</code>, <code>{old_ip_re}</code> (старый IP для sed, с экранированными точками).\n"
+                 "Пример для OpenVPN:\n<pre>sed -i 's/{old_ip_re}/{new_ip}/g' "
+                 "/etc/openvpn/client-template.txt /root/*.ovpn</pre>"),
 }
 TITLES = {"name": "Название", "file": "Файл скрипта", "check_cmd": "Проверка установки", "result": "Результат"}
 
@@ -87,6 +93,7 @@ async def script_card(script_id: int) -> tuple[str, object] | None:
     install = parse_steps(s["install_steps"])
     keysteps = parse_steps(s["key_steps"])
     delsteps = parse_steps(s["delete_steps"])
+    ipsteps = parse_steps(s["ip_steps"])
     if s["filename"]:
         file = f"<code>{escape(s['filename'])}</code> · {fmt_size(len(s['content'] or b''))}"
         if s["source_url"]:
@@ -108,6 +115,7 @@ async def script_card(script_id: int) -> tuple[str, object] | None:
         f"{e('key_new')} Создание ключа: <b>{len(keysteps)}</b> шаг.\n"
         f"{e('upload')} Ключ: {result}\n"
         f"{e('trash')} Удаление ключа: {len(delsteps) or '—'}\n"
+        f"{e('globe')} Смена IP: {len(ipsteps) or '—'}\n"
         f"{e('servers')} Установлен на серверах: <b>{servers}</b> · версия {s['version']}"
     )
     sid = s["id"]
@@ -118,7 +126,8 @@ async def script_card(script_id: int) -> tuple[str, object] | None:
          btn("Проверка", f"sc:e:{sid}:check_cmd", emoji="search", style=BLUE)],
         [btn("Создание ключа", f"sc:e:{sid}:key_steps", emoji="key_new", style=BLUE),
          btn("Результат", f"sc:e:{sid}:result", emoji="upload", style=BLUE)],
-        btn("Удаление ключа", f"sc:e:{sid}:delete_steps", emoji="trash", style=BLUE),
+        [btn("Удаление ключа", f"sc:e:{sid}:delete_steps", emoji="trash", style=BLUE),
+         btn("Смена IP", f"sc:e:{sid}:ip_steps", emoji="globe", style=BLUE)],
         [btn("Выключить" if s["enabled"] else "Включить", f"sc:tog:{sid}",
              emoji="ban" if s["enabled"] else "ok", style=RED if s["enabled"] else GREEN),
          btn("Переустановить везде", f"sc:bump:{sid}", emoji="refresh", style=BLUE)],

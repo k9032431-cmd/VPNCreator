@@ -82,8 +82,9 @@ def server_kb(sid: int):
     return kb(
         btn("Создать ключ на этом сервере", f"k:srv:{sid}", emoji="key_new", style=GREEN),
         [btn("Проверить", f"s:check:{sid}", emoji="search", style=BLUE),
-         btn("Переустановить", f"s:reinst:{sid}", emoji="refresh", style=BLUE)],
-        btn("Удалить сервер", f"s:del:{sid}", emoji="trash", style=RED),
+         btn("Сменить IP", f"s:ip:{sid}", emoji="globe", style=BLUE)],
+        [btn("Переустановить", f"s:reinst:{sid}", emoji="refresh", style=BLUE),
+         btn("Удалить сервер", f"s:del:{sid}", emoji="trash", style=RED)],
         back("s:list"),
     )
 

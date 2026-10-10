@@ -81,8 +81,10 @@ async def connect(c: Creds) -> "Remote":
         return Remote(await asyncssh.connect(**kwargs), c)
     except asyncssh.PermissionDenied as exc:
         raise SSHError("Доступ запрещён: неверный логин, пароль или ключ") from exc
-    except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
-        raise SSHError(f"Не удалось подключиться: {exc or type(exc).__name__}") from exc
+    except asyncio.TimeoutError as exc:
+        raise SSHError("Не удалось подключиться: сервер не отвечает (проверьте IP и порт)") from exc
+    except (OSError, asyncssh.Error) as exc:
+        raise SSHError(f"Не удалось подключиться: {str(exc) or type(exc).__name__}") from exc
 
 
 _SUDO_ERRORS = [

@@ -454,7 +454,12 @@ async def send_bulk(msg: Message, header: str, created: list[dict], failed: list
     except TelegramBadRequest:
         await msg.answer(summary, reply_markup=markup)
 
-    files = [k for k in created if k.get("filename")]
+    await send_key_files(msg, created)
+
+
+async def send_key_files(msg: Message, keys: list[dict]):
+    """Все ключи: файлы — альбомами по 10, текстовые ключи — одним файлом keys.txt."""
+    files = [k for k in keys if k.get("filename")]
     for i in range(0, len(files), 10):
         group = files[i:i + 10]
         if len(group) == 1:
@@ -465,7 +470,7 @@ async def send_bulk(msg: Message, header: str, created: list[dict], failed: list
                                     caption=key_caption(k) if last and j == len(group) - 1 else None)
                  for j, k in enumerate(group)]
         await msg.answer_media_group(media)
-    texts = [k for k in created if not k.get("filename")]
+    texts = [k for k in keys if not k.get("filename")]
     if texts:
         body = "\n\n".join(f"{k['name']}\n{k['value']}" for k in texts)
         await msg.answer_document(BufferedInputFile(body.encode(), "keys.txt"),

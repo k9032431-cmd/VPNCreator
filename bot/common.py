@@ -48,6 +48,10 @@ class AddServer(StatesGroup):
     passphrase = State()
 
 
+class ChangeIP(StatesGroup):
+    host = State()
+
+
 class CreateKey(StatesGroup):
     name = State()
     bulk = State()

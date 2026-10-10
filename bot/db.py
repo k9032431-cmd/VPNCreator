@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS scripts (
     result_path   TEXT NOT NULL DEFAULT '',      -- путь к файлу ключа, напр. /root/{name}.ovpn
     key_regex     TEXT NOT NULL DEFAULT '',
     delete_steps  TEXT NOT NULL DEFAULT '',
+    ip_steps      TEXT NOT NULL DEFAULT '',     -- команды при смене IP сервера
     enabled       INTEGER NOT NULL DEFAULT 1,
     version       INTEGER NOT NULL DEFAULT 1,
     created_at    INTEGER NOT NULL
@@ -67,11 +68,12 @@ CREATE TABLE IF NOT EXISTS server_scripts (
 """
 
 MIGRATIONS = {
+    "scripts": {"ip_steps": "TEXT NOT NULL DEFAULT ''"},
     "keys": {"script_id": "INTEGER", "filename": "TEXT"},
 }
 
 SCRIPT_FIELDS = {"name", "filename", "content", "source_url", "install_steps", "check_cmd", "key_steps",
-                 "result_type", "result_path", "key_regex", "delete_steps", "enabled"}
+                 "result_type", "result_path", "key_regex", "delete_steps", "ip_steps", "enabled"}
 # изменение этих полей требует повторной установки на серверах
 REINSTALL_FIELDS = {"filename", "content", "install_steps", "check_cmd"}
 
@@ -184,6 +186,22 @@ class Database:
         if owner_id is None:
             return await self._scalar("SELECT COUNT(*) FROM servers")
         return await self._scalar("SELECT COUNT(*) FROM servers WHERE owner_id=?", (owner_id,))
+
+    async def set_server_host(self, sid: int, host: str) -> None:
+        await self._exec("UPDATE servers SET host=? WHERE id=?", (host, sid))
+
+    async def installed_scripts(self, sid: int) -> list[Row]:
+        return await self._all(
+            "SELECT sc.* FROM scripts sc JOIN server_scripts ss ON ss.script_id=sc.id WHERE ss.server_id=?", (sid,))
+
+    async def server_keys(self, sid: int) -> list[Row]:
+        return await self._all(
+            "SELECT k.*, s.name AS server_name, sc.name AS script_name FROM keys k "
+            "LEFT JOIN servers s ON s.id=k.server_id LEFT JOIN scripts sc ON sc.id=k.script_id "
+            "WHERE k.server_id=? ORDER BY k.id", (sid,))
+
+    async def set_key_value(self, kid: int, value: str) -> None:
+        await self._exec("UPDATE keys SET value=? WHERE id=?", (value, kid))
 
     async def delete_server(self, sid: int) -> None:
         await self._exec("DELETE FROM keys WHERE server_id=?", (sid,))

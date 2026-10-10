@@ -11,7 +11,7 @@ from . import updater
 from .common import UserMiddleware, db
 from .config import config
 from .emoji import e
-from .handlers import admin, keys, scripts, servers, settings, start
+from .handlers import admin, ipchange, keys, scripts, servers, settings, start
 
 fallback = Router(name="fallback")
 
@@ -38,7 +38,8 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.outer_middleware(UserMiddleware())
     dp.callback_query.outer_middleware(UserMiddleware())
-    dp.include_routers(start.router, admin.router, scripts.router, settings.router, servers.router, keys.router, fallback)
+    dp.include_routers(start.router, admin.router, scripts.router, settings.router, servers.router,
+                       ipchange.router, keys.router, fallback)
     await bot.set_my_commands([
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="help", description="Помощь"),
